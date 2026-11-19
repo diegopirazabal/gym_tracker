@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Hypertrophy Tracker — Unit Tests</title>
+  <style>
+    body { background: #0B0D12; color: #F4F6FA; font-family: ui-monospace, SFMono-Regular, monospace; padding: 20px; }
+    .pass { color: #22C55E; }
+    .fail { color: #EF4444; }
+  </style>
+</head>
+<body>
+  <h1>Hypertrophy Tracker PWA — Unit Tests</h1>
+  <pre id="output">Running...</pre>
+  <script type="module">
+    import {
+      buildInitialDayDraft,
+      buildReferenceBanner,
+      computeEpley1RM,
+      computeSuggestedSet,
+      computeTonnage,
+      pickDefaultDay,
+      summarizeDraft,
+    } from './js/domain.js';
+    import { createDemoBootstrap } from './js/demo-data.js';
+    import { applyDemoSessionSave } from './js/api.js';
+
+    const results = [];
+    function test(name, fn) {
+      try {
+        fn();
+        results.push({ name, ok: true });
+      } catch (err) {
+        results.push({ name, ok: false, error: err.message });
+      }
+    }
+    function assertEq(actual, expected, msg = '') {
+      const a = JSON.stringify(actual);
+      const e = JSON.stringify(expected);
+      if (a !== e) throw new Error(`${msg} expected ${e}, got ${a}`);
+    }
+
+    const demo = createDemoBootstrap();
+
+    test('Tonnage unilateral x2 and bilateral x1', () => {
+      assertEq(computeTonnage(20, 8, 2), 320);
+      assertEq(computeTonnage(60, 6, 1), 360);
+      assertEq(computeTonnage(20, 0, 2), 0);
+    });
+
+    test('Epley 1RM formula', () => {
+      assertEq(computeEpley1RM(55, 9), 71.5);
+      assertEq(computeEpley1RM(20, 8), 25.3);
+    });
+
+    test('Per-set progressive overload on LUNES (only sets >= Rep_Max increase)', () => {
+      const draft = buildInitialDayDraft('LUNES', demo);
+      const sp = draft.exercises.find((e) => e.exercise === 'Shoulder Press DB');
+      // S1 had 20kg x 8 (< 10) -> stays 20, delta 0; S2 had 17.5kg x 10 (>= 10) -> +2.5 = 20
+      assertEq(sp.sets[0].weightKg, 20);
+      assertEq(sp.sets[0].overloadDelta, 0);
+      assertEq(sp.sets[1].weightKg, 20);
+      assertEq(sp.sets[1].overloadDelta, 2.5);
+
+      const lrm = draft.exercises.find((e) => e.exercise === 'Lat raise machine');
+      // S1 had 25x12 (>=12) -> 30 (+5); S2 had 25x11 (<12) -> 25 (0)
+      assertEq(lrm.sets[0].weightKg, 30);
+      assertEq(lrm.sets[0].overloadDelta, 5);
+      assertEq(lrm.sets[1].weightKg, 25);
+      assertEq(lrm.sets[1].overloadDelta, 0);
+    });
+
+    test('Same exercise on different days stays scoped per (day, exercise)', () => {
+      const friDraft = buildInitialDayDraft('VIERNES', demo);
+      const friLrm = friDraft.exercises.find((e) => e.exercise === 'Lat raise machine');
+      // Friday last session was 20kg x 18/16/14 (all >= 12) -> 25/25/25 (+5 each), NOT Lunes's 30/25
+      assertEq(friLrm.sets.map((s) => s.weightKg), [25, 25, 25]);
+      assertEq(friLrm.sets.map((s) => s.overloadDelta), [5, 5, 5]);
+    });
+
+    test('Missed / unlogged day (SABADO) falls back cleanly to Rutina Peso_Base', () => {
+      const satDraft = buildInitialDayDraft('SABADO', demo);
+      const remo = satDraft.exercises.find((e) => e.exercise === 'Remo T');
+      const preacher = satDraft.exercises.find((e) => e.exercise === 'Preacher');
+      assertEq(remo.sets.map((s) => s.weightKg), [30, 30]);
+      assertEq(preacher.sets.map((s) => s.weightKg), [12.5, 10, 10]);
+      assertEq(remo.sets[0].overloadDelta, 0);
+    });
+
+    test('Null Rep_Max (Pull over) never throws and preserves weight', () => {
+      const meta = demo.dictionary['Pull over'];
+      const suggestion = computeSuggestedSet(
+        0,
+        { exercise: 'Pull over', setsCount: 2, baseWeights: [20, 20] },
+        meta,
+        [{ setNumber: 1, weightKg: 20, reps: 15 }]
+      );
+      assertEq(suggestion.weightKg, 20);
+      assertEq(suggestion.overloadDelta, 0);
+    });
+
+    test('Reference banner returns exact 2 key exercises for MIERCOLES', () => {
+      const banner = buildReferenceBanner('MIERCOLES', demo);
+      assertEq(banner.dateIso, '2026-11-11');
+      assertEq(banner.items.map((i) => i.exercise), ['Jalon wide', 'Inclinado c/barra']);
+    });
+
+    test('summarizeDraft ignores empty sets and detects upcoming progressions', () => {
+      const draft = buildInitialDayDraft('MARTES', demo);
+      draft.exercises[0].sets[0].reps = '10'; // Hacka 60x10 (repMax=10 -> +5 next week!)
+      draft.exercises[0].sets[1].reps = '';   // empty set ignored
+      draft.exercises[0].obs = 'muy sólida';
+      const summary = summarizeDraft(draft, demo.dictionary);
+      assertEq(summary.completedSets, 1);
+      assertEq(summary.totalTonnage, 600);
+      assertEq(summary.flatSets.length, 1);
+      assertEq(summary.flatSets[0].obs, 'muy sólida');
+      assertEq(summary.nextWeekProgressions.length, 1);
+      assertEq(summary.nextWeekProgressions[0].toKg, 65);
+    });
+
+    test('pickDefaultDay selects Wednesday on 2026-11-18', () => {
+      assertEq(pickDefaultDay('2026-11-18', demo.loggedThisWeek), 'MIERCOLES');
+    });
+
+    test('applyDemoSessionSave updates weeklySummary & adherence accurately', () => {
+      const res = applyDemoSessionSave(demo, {
+        day: 'MARTES',
+        dateIso: '2026-11-17',
+        sets: [
+          { exercise: 'Hacka', setNumber: 1, weightKg: 60, reps: 8, obs: '' },
+          { exercise: 'Hacka', setNumber: 2, weightKg: 60, reps: 7, obs: '' },
+        ],
+      });
+      assertEq(res.ok, true);
+      assertEq(res.insertedCount, 2);
+      assertEq(res.data.weeklySummary.daysCompleted, 2);
+      const piernas = res.data.weeklySummary.byMuscleGroup.find((g) => g.muscleGroup === 'Piernas');
+      assertEq(piernas.tonnage, 900);
+    });
+
+    const passed = results.filter((r) => r.ok).length;
+    const failed = results.length - passed;
+    const lines = results.map((r) =>
+      r.ok ? `PASS  ${r.name}` : `FAIL  ${r.name}: ${r.error}`
+    );
+    lines.push('', `Summary: ${passed}/${results.length} passed, ${failed} failed`);
+    const out = document.getElementById('output');
+    out.textContent = lines.join('\n');
+    out.className = failed === 0 ? 'pass' : 'fail';
+    window.__TEST_RESULTS__ = { passed, failed, total: results.length, results };
+  </script>
+</body>
+</html>
